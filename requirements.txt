@@ -1,8 +1,8 @@
-torch>=2.0.0
-transformers>=4.30.0
+torch
+transformers
+streamlit
+python-dotenv
+langchain
+langchain_huggingface
 sentencepiece==0.1.99
 protobuf==4.25.3
-langchain>=0.0.200
-langchain-huggingface>=0.0.1
-streamlit>=1.24.0
-python-dotenv>=0.19.0

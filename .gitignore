@@ -25,6 +25,7 @@ venv/
 env/
 ENV/
 .env
+.venv
 
 # IDE
 .idea/
@@ -45,6 +46,8 @@ huggingface_cache/
 # Credentials and Environment Variables
 .env
 .env.*
+.env.local
+.env.*.local
 credentials.json
 *_token.txt
 *.key
