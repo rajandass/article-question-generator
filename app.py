@@ -1,8 +1,31 @@
+import os
+import torch
+from torch.cuda.amp import autocast
+from contextlib import nullcontext
+
+# Configure PyTorch first
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+# Set environment variables
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['TRANSFORMERS_CACHE'] = "D:/huggingface_cache"
+os.environ['HF_HOME'] = "D:/huggingface_cache"
+os.environ['HF_DATASETS_CACHE'] = "D:/huggingface_cache"
+os.environ['HUGGINGFACE_HUB_CACHE'] = "D:/huggingface_cache"
+
+from dotenv import load_dotenv
 import streamlit as st
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 from langchain_huggingface import HuggingFacePipeline
 from typing import List, Dict, Literal
 import time
+
+# Load environment variables
+load_dotenv()
+
+# Token now loaded from .env file automatically
 
 # Set page configuration
 st.set_page_config(
@@ -49,51 +72,65 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
                          question_model="mrm8488/t5-base-finetuned-question-generation-ap",
                          refinement_model="facebook/bart-large-xsum"):
     """Initialize all required pipelines with caching for efficiency"""
-    # Summarization pipeline
-    sum_tokenizer = AutoTokenizer.from_pretrained(summarization_model)
-    sum_model = AutoModelForSeq2SeqLM.from_pretrained(summarization_model)
-    summarization_pipeline = HuggingFacePipeline(
-        pipeline=pipeline(
-            "summarization",
-            model=sum_model,
-            tokenizer=sum_tokenizer,
-            max_length=150,
-            min_length=30,
-            do_sample=False
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.cuda.empty_cache()
+
+    try:
+        # Summarization pipeline without fixed max_length
+        sum_tokenizer = AutoTokenizer.from_pretrained(summarization_model)
+        sum_model = AutoModelForSeq2SeqLM.from_pretrained(summarization_model).to(device)
+        summarization_pipeline = lambda text, max_len: HuggingFacePipeline(
+            pipeline=pipeline(
+                "summarization",
+                model=sum_model,
+                tokenizer=sum_tokenizer,
+                max_length=max_len,
+                min_length=min(30, max_len//2),
+                do_sample=False,
+                device=device,
+                batch_size=1
+            )
+        ).invoke(text)
+        
+        # Question generation pipeline
+        from transformers import T5Tokenizer  # Add this import at the top of your file
+        q_tokenizer = T5Tokenizer.from_pretrained(question_model)
+        q_model = AutoModelForSeq2SeqLM.from_pretrained(question_model).to(device)
+        question_pipeline = HuggingFacePipeline(
+            pipeline=pipeline(
+                "text2text-generation",
+                model=q_model,
+                tokenizer=q_tokenizer,
+                max_length=64,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.95,
+                device=device,
+                batch_size=1
+            )
         )
-    )
-    
-    # Question generation pipeline - Using explicit T5Tokenizer
-    from transformers import T5Tokenizer  # Add this import at the top of your file
-    q_tokenizer = T5Tokenizer.from_pretrained(question_model)
-    q_model = AutoModelForSeq2SeqLM.from_pretrained(question_model)
-    question_pipeline = HuggingFacePipeline(
-        pipeline=pipeline(
-            "text2text-generation",
-            model=q_model,
-            tokenizer=q_tokenizer,
-            max_length=64,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.95
+        
+        # Refinement pipeline
+        refine_tokenizer = AutoTokenizer.from_pretrained(refinement_model)
+        refine_model = AutoModelForSeq2SeqLM.from_pretrained(refinement_model).to(device)
+        refinement_pipeline = HuggingFacePipeline(
+            pipeline=pipeline(
+                "summarization",
+                model=refine_model,
+                tokenizer=refine_tokenizer,
+                max_length=100,
+                min_length=30,
+                do_sample=True,
+                temperature=0.4,
+                device=device,
+                batch_size=1
+            )
         )
-    )
-    
-    # Refinement pipeline (for model-based refinement)
-    refine_tokenizer = AutoTokenizer.from_pretrained(refinement_model)
-    refine_model = AutoModelForSeq2SeqLM.from_pretrained(refinement_model)
-    refinement_pipeline = HuggingFacePipeline(
-        pipeline=pipeline(
-            "summarization",
-            model=refine_model,
-            tokenizer=refine_tokenizer,
-            max_length=100,
-            min_length=30,
-            do_sample=True,
-            temperature=0.4  # Lower temperature for more focused refinement
-        )
-    )
-    
+        
+    except Exception as e:
+        st.error(f"Error initializing models: {str(e)}")
+        raise e
+        
     return summarization_pipeline, question_pipeline, refinement_pipeline
 
 def chunk_text(text: str, max_chunk_size: int = 1000) -> List[str]:
@@ -117,22 +154,37 @@ def chunk_text(text: str, max_chunk_size: int = 1000) -> List[str]:
 
 def summarize_article(article_text: str, summarization_pipeline):
     """Generate a concise summary of the article"""
-    # Handle longer texts by chunking and summarizing each chunk
-    chunks = chunk_text(article_text)
-    chunk_summaries = []
-    
-    for chunk in chunks:
-        summary = summarization_pipeline.invoke(chunk)
-        chunk_summaries.append(summary)
-    
-    # Combine chunk summaries
-    full_summary = " ".join(chunk_summaries)
-    
-    # If the combined summary is still long, summarize again
-    if len(full_summary.split()) > 150:
-        full_summary = summarization_pipeline.invoke(full_summary)
+    try:
+        chunks = chunk_text(article_text, max_chunk_size=500)
+        chunk_summaries = []
         
-    return full_summary
+        use_amp = torch.cuda.is_available()
+        amp_context = autocast(enabled=True) if use_amp else nullcontext()
+        
+        for chunk in chunks:
+            if use_amp:
+                torch.cuda.empty_cache()
+                
+            with amp_context:
+                # Calculate dynamic max_length based on input length
+                input_length = len(chunk.split())
+                max_length = min(150, max(30, input_length // 2))
+                
+                summary = summarization_pipeline(chunk, max_length)
+                chunk_summaries.append(summary)
+        
+        full_summary = " ".join(chunk_summaries)
+        
+        if len(full_summary.split()) > 150:
+            input_length = len(full_summary.split())
+            max_length = min(150, max(30, input_length // 2))
+            with amp_context:
+                full_summary = summarization_pipeline(full_summary, max_length)
+                
+        return full_summary
+    except Exception as e:
+        st.error(f"Error during summarization: {str(e)}")
+        return "Error generating summary."
 
 def refine_summary_manually(summary: str) -> str:
     """Extract key points and refine the summary using rule-based approaches"""

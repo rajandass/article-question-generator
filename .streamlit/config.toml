@@ -1,0 +1,9 @@
+[server]
+runOnSave = false
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[logger]
+level = "error"
