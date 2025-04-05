@@ -1,6 +1,6 @@
 # Article Question Generator
 
-An AI-powered application that automatically generates relevant questions from articles using state-of-the-art NLP models.
+AI-powered application that generates questions from articles using Hugging Face models and LangChain.
 
 ## Features
 
@@ -21,13 +21,15 @@ An AI-powered application that automatically generates relevant questions from a
 - langchain
 - torch
 
-## Installation
+## Setup
 
-```bash
-git clone <repository-url>
-cd langchain-huggingface
-pip install -r requirements.txt
-```
+1. Clone the repository
+2. Create a virtual environment: `python -m venv venv`
+3. Activate the environment:
+   - Windows: `venv\Scripts\activate`
+   - Unix/MacOS: `source venv/bin/activate`
+4. Install dependencies: `pip install -r requirements.txt`
+5. Run the app: `streamlit run app.py`
 
 ## Usage
 
@@ -76,6 +78,13 @@ The application uses a pipeline architecture:
 3. Question generation
 
 Each step is processed with progress tracking and error handling.
+
+## Development
+
+To create a new feature branch:
+```bash
+git checkout -b feature/your-feature-name
+```
 
 ## License
 

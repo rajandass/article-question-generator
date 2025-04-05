@@ -10,10 +10,10 @@ torch.backends.cudnn.allow_tf32 = True
 
 # Set environment variables
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['TRANSFORMERS_CACHE'] = "D:/huggingface_cache"
-os.environ['HF_HOME'] = "D:/huggingface_cache"
-os.environ['HF_DATASETS_CACHE'] = "D:/huggingface_cache"
-os.environ['HUGGINGFACE_HUB_CACHE'] = "D:/huggingface_cache"
+os.environ['TRANSFORMERS_CACHE'] = "/root/.cache/huggingface"
+os.environ['HF_HOME'] = "/root/.cache/huggingface"
+os.environ['HF_DATASETS_CACHE'] = "/root/.cache/huggingface"
+os.environ['HUGGINGFACE_HUB_CACHE'] = "/root/.cache/huggingface"
 
 from dotenv import load_dotenv
 import streamlit as st
@@ -67,7 +67,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_resource(show_spinner="Loading models... (This may take a minute)")
+@st.cache_resource(show_spinner="Loading models...")
 def initialize_pipelines(summarization_model="facebook/bart-large-cnn", 
                          question_model="mrm8488/t5-base-finetuned-question-generation-ap",
                          refinement_model="facebook/bart-large-xsum"):
@@ -75,10 +75,26 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.cuda.empty_cache()
 
+    # Set environment variables
+    os.environ['TRANSFORMERS_OFFLINE'] = '1'  # Force offline mode
+    cache_dir = "/root/.cache/huggingface"
+
     try:
+        # Load models from cache only
+        sum_tokenizer = AutoTokenizer.from_pretrained(
+            summarization_model, 
+            local_files_only=True,
+            cache_dir=cache_dir
+        )
+        sum_model = AutoModelForSeq2SeqLM.from_pretrained(summarization_model, local_files_only=True).to(device)
+        
+        q_tokenizer = T5Tokenizer.from_pretrained(question_model, local_files_only=True)
+        q_model = AutoModelForSeq2SeqLM.from_pretrained(question_model, local_files_only=True).to(device)
+        
+        refine_tokenizer = AutoTokenizer.from_pretrained(refinement_model, local_files_only=True)
+        refine_model = AutoModelForSeq2SeqLM.from_pretrained(refinement_model, local_files_only=True).to(device)
+
         # Summarization pipeline without fixed max_length
-        sum_tokenizer = AutoTokenizer.from_pretrained(summarization_model)
-        sum_model = AutoModelForSeq2SeqLM.from_pretrained(summarization_model).to(device)
         summarization_pipeline = lambda text, max_len: HuggingFacePipeline(
             pipeline=pipeline(
                 "summarization",
@@ -94,8 +110,6 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
         
         # Question generation pipeline
         from transformers import T5Tokenizer  # Add this import at the top of your file
-        q_tokenizer = T5Tokenizer.from_pretrained(question_model)
-        q_model = AutoModelForSeq2SeqLM.from_pretrained(question_model).to(device)
         question_pipeline = HuggingFacePipeline(
             pipeline=pipeline(
                 "text2text-generation",
@@ -111,8 +125,6 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
         )
         
         # Refinement pipeline
-        refine_tokenizer = AutoTokenizer.from_pretrained(refinement_model)
-        refine_model = AutoModelForSeq2SeqLM.from_pretrained(refinement_model).to(device)
         refinement_pipeline = HuggingFacePipeline(
             pipeline=pipeline(
                 "summarization",
