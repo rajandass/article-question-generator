@@ -1,17 +1,51 @@
 version: '3.8'
 
 services:
-  app:
+  article-qa:
     build: .
     ports:
       - "8501:8501"
-    volumes:
-      - huggingface_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
+      - CUDA_VISIBLE_DEVICES=0
       - TRANSFORMERS_CACHE=/root/.cache/huggingface
       - HF_HOME=/root/.cache/huggingface
       - HF_DATASETS_CACHE=/root/.cache/huggingface
       - HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface
+      - HTTPS_PROXY=${HTTPS_PROXY:-}  # Pass host proxy if exists
+      - NO_PROXY=localhost,127.0.0.1
+      - DOWNLOAD_MODELS=true    # Flag to control model download
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
+    shm_size: '12gb'
+    mem_limit: '24g'
+    healthcheck:
+      test: 
+        - "CMD"
+        - "python"
+        - "-c"
+        - "from pathlib import Path; exit(0 if (Path('/root/.cache/huggingface/facebook/bart-large-cnn/config.json').exists()) else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # Give time for initial model download
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    networks:
+      - app_network
 
 volumes:
   huggingface_cache:
+    name: huggingface_cache
+
+networks:
+  app_network:
+    driver: bridge
