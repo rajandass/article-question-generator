@@ -63,8 +63,9 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
         )
     )
     
-    # Question generation pipeline
-    q_tokenizer = AutoTokenizer.from_pretrained(question_model)
+    # Question generation pipeline - Using explicit T5Tokenizer
+    from transformers import T5Tokenizer  # Add this import at the top of your file
+    q_tokenizer = T5Tokenizer.from_pretrained(question_model)
     q_model = AutoModelForSeq2SeqLM.from_pretrained(question_model)
     question_pipeline = HuggingFacePipeline(
         pipeline=pipeline(
