@@ -1,20 +1,37 @@
 import os
 import torch
+import logging
 from torch.cuda.amp import autocast
 from contextlib import nullcontext
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM, T5Tokenizer
 
-# Configure PyTorch first
-torch.backends.cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+# Configure logging
+logging.basicConfig(
+    level=os.environ.get('LOG_LEVEL', 'INFO'),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Check for GPU and configure PyTorch accordingly
+use_gpu = os.environ.get('USE_GPU', 'true').lower() == 'true'
+if use_gpu and torch.cuda.is_available():
+    logger.info(f"GPU available: {torch.cuda.get_device_name(0)}")
+    device = "cuda"
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+else:
+    if use_gpu and not torch.cuda.is_available():
+        logger.warning("GPU requested but not available. Falling back to CPU.")
+    device = "cpu"
+    logger.info("Using CPU for model inference")
 
 # Set environment variables
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['TRANSFORMERS_CACHE'] = "/root/.cache/huggingface"
-os.environ['HF_HOME'] = "/root/.cache/huggingface"
-os.environ['HF_DATASETS_CACHE'] = "/root/.cache/huggingface"
-os.environ['HUGGINGFACE_HUB_CACHE'] = "/root/.cache/huggingface"
+os.environ['TRANSFORMERS_CACHE'] = os.environ.get('HUGGINGFACE_HUB_CACHE', "/root/.cache/huggingface")
+os.environ['HF_HOME'] = os.environ.get('HUGGINGFACE_HUB_CACHE', "/root/.cache/huggingface")
+os.environ['HF_DATASETS_CACHE'] = os.environ.get('HUGGINGFACE_HUB_CACHE', "/root/.cache/huggingface")
+os.environ['HUGGINGFACE_HUB_CACHE'] = os.environ.get('HUGGINGFACE_HUB_CACHE', "/root/.cache/huggingface")
 
 from dotenv import load_dotenv
 import streamlit as st
@@ -22,7 +39,7 @@ from langchain_huggingface import HuggingFacePipeline
 from typing import List, Dict, Literal
 import time
 
-# Load environment variables
+# Load environment variables from .env file if present
 load_dotenv()
 
 # Set page configuration
@@ -70,70 +87,94 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
                          question_model="mrm8488/t5-base-finetuned-question-generation-ap",
                          refinement_model="facebook/bart-large-xsum"):
     """Initialize all required pipelines with caching for efficiency"""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch.cuda.empty_cache()
+    # Clear GPU memory if using CUDA
+    if device == "cuda":
+        torch.cuda.empty_cache()
 
     # Determine whether to use local files only based on offline mode
-    local_files_only = os.environ.get('TRANSFORMERS_OFFLINE', '0') == '1'
-    cache_dir = "/root/.cache/huggingface"
+    local_files_only = os.environ.get('TRANSFORMERS_OFFLINE', '1') == '1'
+    cache_dir = os.environ.get('HUGGINGFACE_HUB_CACHE', "/root/.cache/huggingface")
+    
+    logger.info(f"Initializing models (device: {device}, local_files_only: {local_files_only})")
+    
+    model_info = {
+        "summarization": {"model": None, "tokenizer": None, "name": summarization_model},
+        "question": {"model": None, "tokenizer": None, "name": question_model},
+        "refinement": {"model": None, "tokenizer": None, "name": refinement_model}
+    }
 
     try:
-        # Load models with proper exception handling
+        # Load summarization model
         try:
-            sum_tokenizer = AutoTokenizer.from_pretrained(
+            logger.info(f"Loading summarization model: {summarization_model}")
+            model_info["summarization"]["tokenizer"] = AutoTokenizer.from_pretrained(
                 summarization_model, 
                 local_files_only=local_files_only,
                 cache_dir=cache_dir
             )
-            sum_model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_info["summarization"]["model"] = AutoModelForSeq2SeqLM.from_pretrained(
                 summarization_model, 
                 local_files_only=local_files_only,
                 cache_dir=cache_dir
             ).to(device)
+            logger.info("✓ Summarization model loaded successfully")
         except Exception as e:
-            st.error(f"Failed to load summarization model: {str(e)}")
+            err_msg = f"Failed to load summarization model: {str(e)}"
+            logger.error(err_msg)
+            st.error(err_msg)
             raise
         
+        # Load question model
         try:
-            q_tokenizer = T5Tokenizer.from_pretrained(
+            logger.info(f"Loading question generation model: {question_model}")
+            model_info["question"]["tokenizer"] = T5Tokenizer.from_pretrained(
                 question_model, 
                 local_files_only=local_files_only,
                 cache_dir=cache_dir
             )
-            q_model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_info["question"]["model"] = AutoModelForSeq2SeqLM.from_pretrained(
                 question_model, 
                 local_files_only=local_files_only,
                 cache_dir=cache_dir
             ).to(device)
+            logger.info("✓ Question generation model loaded successfully")
         except Exception as e:
-            st.error(f"Failed to load question generation model: {str(e)}")
+            err_msg = f"Failed to load question generation model: {str(e)}"
+            logger.error(err_msg)
+            st.error(err_msg)
             raise
         
+        # Load refinement model
         try:
-            refine_tokenizer = AutoTokenizer.from_pretrained(
+            logger.info(f"Loading refinement model: {refinement_model}")
+            model_info["refinement"]["tokenizer"] = AutoTokenizer.from_pretrained(
                 refinement_model, 
                 local_files_only=local_files_only,
                 cache_dir=cache_dir
             )
-            refine_model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_info["refinement"]["model"] = AutoModelForSeq2SeqLM.from_pretrained(
                 refinement_model, 
                 local_files_only=local_files_only,
                 cache_dir=cache_dir
             ).to(device)
+            logger.info("✓ Refinement model loaded successfully")
         except Exception as e:
-            st.error(f"Failed to load refinement model: {str(e)}")
+            err_msg = f"Failed to load refinement model: {str(e)}"
+            logger.error(err_msg)
+            st.error(err_msg)
             raise
 
-        # Summarization pipeline without fixed max_length
+        # Create pipeline functions
+        # Summarization pipeline with dynamic max_length
         summarization_pipeline = lambda text, max_len: HuggingFacePipeline(
             pipeline=pipeline(
                 "summarization",
-                model=sum_model,
-                tokenizer=sum_tokenizer,
+                model=model_info["summarization"]["model"],
+                tokenizer=model_info["summarization"]["tokenizer"],
                 max_length=max_len,
                 min_length=min(30, max_len//2),
                 do_sample=False,
-                device=device,
+                device=0 if device == "cuda" else -1,
                 batch_size=1
             )
         ).invoke(text)
@@ -142,13 +183,13 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
         question_pipeline = HuggingFacePipeline(
             pipeline=pipeline(
                 "text2text-generation",
-                model=q_model,
-                tokenizer=q_tokenizer,
+                model=model_info["question"]["model"],
+                tokenizer=model_info["question"]["tokenizer"],
                 max_length=64,
                 do_sample=True,
                 temperature=0.7,
                 top_p=0.95,
-                device=device,
+                device=0 if device == "cuda" else -1,
                 batch_size=1
             )
         )
@@ -157,22 +198,28 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
         refinement_pipeline = HuggingFacePipeline(
             pipeline=pipeline(
                 "summarization",
-                model=refine_model,
-                tokenizer=refine_tokenizer,
+                model=model_info["refinement"]["model"],
+                tokenizer=model_info["refinement"]["tokenizer"],
                 max_length=100,
                 min_length=30,
                 do_sample=True,
                 temperature=0.4,
-                device=device,
+                device=0 if device == "cuda" else -1,
                 batch_size=1
             )
         )
         
-    except Exception as e:
-        st.error(f"Error initializing models: {str(e)}")
-        raise e
+        logger.info("All pipelines initialized successfully")
+        return summarization_pipeline, question_pipeline, refinement_pipeline
         
-    return summarization_pipeline, question_pipeline, refinement_pipeline
+    except Exception as e:
+        err_msg = f"Failed to initialize pipelines: {str(e)}"
+        logger.error(err_msg)
+        st.error(err_msg)
+        raise
+
+# The rest of the application code remains the same
+# ... (chunk_text, summarize_article, refine_summary_manually, refine_summary_with_model, generate_questions, process_article)
 
 def chunk_text(text: str, max_chunk_size: int = 1000) -> List[str]:
     """Break text into chunks that fit within model context limits"""
@@ -199,7 +246,7 @@ def summarize_article(article_text: str, summarization_pipeline):
         chunks = chunk_text(article_text, max_chunk_size=500)
         chunk_summaries = []
         
-        use_amp = torch.cuda.is_available()
+        use_amp = device == "cuda"
         amp_context = autocast(enabled=True) if use_amp else nullcontext()
         
         for chunk in chunks:
@@ -224,6 +271,7 @@ def summarize_article(article_text: str, summarization_pipeline):
                 
         return full_summary
     except Exception as e:
+        logger.error(f"Error during summarization: {str(e)}")
         st.error(f"Error during summarization: {str(e)}")
         return "Error generating summary."
 
@@ -344,12 +392,19 @@ def main():
         value=5,
         help="Select how many questions to generate from the article"
     )
+
+    # Display device information
+    st.sidebar.markdown(f"**Device:** {'GPU' if device == 'cuda' else 'CPU'}")
+    if device == "cuda":
+        st.sidebar.markdown(f"**GPU:** {torch.cuda.get_device_name(0)}")
     
     # Models selection (advanced options)
     with st.sidebar.expander("Advanced Model Options"):
+        st.markdown("**Note:** Changing models requires reloading and may take time.")
+        
         summarization_model = st.selectbox(
             "Summarization Model",
-            ["facebook/bart-large-cnn", "google/pegasus-xsum", "facebook/bart-large-xsum"],
+            ["facebook/bart-large-cnn", "facebook/bart-large-xsum", "google/pegasus-xsum"],
             index=0,
             help="Choose the model for article summarization"
         )
@@ -363,10 +418,15 @@ def main():
         
         refinement_model = st.selectbox(
             "Refinement Model",
-            ["facebook/bart-large-xsum", "google/pegasus-xsum"],
+            ["facebook/bart-large-xsum", "facebook/bart-large-cnn"],
             index=0,
             help="Choose the model for refining the summary (only used with model-based refinement)"
         )
+    
+    # System status indicator
+    offline_mode = os.environ.get('TRANSFORMERS_OFFLINE', '1') == '1'
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"**System Status:** {'Offline Mode' if offline_mode else 'Online Mode'}")
     
     # Handle potential model loading errors
     try:
