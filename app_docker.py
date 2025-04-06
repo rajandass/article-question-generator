@@ -2,6 +2,7 @@ import os
 import torch
 from torch.cuda.amp import autocast
 from contextlib import nullcontext
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM, T5Tokenizer
 
 # Configure PyTorch first
 torch.backends.cudnn.benchmark = True
@@ -17,15 +18,12 @@ os.environ['HUGGINGFACE_HUB_CACHE'] = "/root/.cache/huggingface"
 
 from dotenv import load_dotenv
 import streamlit as st
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 from langchain_huggingface import HuggingFacePipeline
 from typing import List, Dict, Literal
 import time
 
 # Load environment variables
 load_dotenv()
-
-# Token now loaded from .env file automatically
 
 # Set page configuration
 st.set_page_config(
@@ -75,24 +73,56 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.cuda.empty_cache()
 
-    # Set environment variables
-    os.environ['TRANSFORMERS_OFFLINE'] = '1'  # Force offline mode
+    # Determine whether to use local files only based on offline mode
+    local_files_only = os.environ.get('TRANSFORMERS_OFFLINE', '0') == '1'
     cache_dir = "/root/.cache/huggingface"
 
     try:
-        # Load models from cache only
-        sum_tokenizer = AutoTokenizer.from_pretrained(
-            summarization_model, 
-            local_files_only=True,
-            cache_dir=cache_dir
-        )
-        sum_model = AutoModelForSeq2SeqLM.from_pretrained(summarization_model, local_files_only=True).to(device)
+        # Load models with proper exception handling
+        try:
+            sum_tokenizer = AutoTokenizer.from_pretrained(
+                summarization_model, 
+                local_files_only=local_files_only,
+                cache_dir=cache_dir
+            )
+            sum_model = AutoModelForSeq2SeqLM.from_pretrained(
+                summarization_model, 
+                local_files_only=local_files_only,
+                cache_dir=cache_dir
+            ).to(device)
+        except Exception as e:
+            st.error(f"Failed to load summarization model: {str(e)}")
+            raise
         
-        q_tokenizer = T5Tokenizer.from_pretrained(question_model, local_files_only=True)
-        q_model = AutoModelForSeq2SeqLM.from_pretrained(question_model, local_files_only=True).to(device)
+        try:
+            q_tokenizer = T5Tokenizer.from_pretrained(
+                question_model, 
+                local_files_only=local_files_only,
+                cache_dir=cache_dir
+            )
+            q_model = AutoModelForSeq2SeqLM.from_pretrained(
+                question_model, 
+                local_files_only=local_files_only,
+                cache_dir=cache_dir
+            ).to(device)
+        except Exception as e:
+            st.error(f"Failed to load question generation model: {str(e)}")
+            raise
         
-        refine_tokenizer = AutoTokenizer.from_pretrained(refinement_model, local_files_only=True)
-        refine_model = AutoModelForSeq2SeqLM.from_pretrained(refinement_model, local_files_only=True).to(device)
+        try:
+            refine_tokenizer = AutoTokenizer.from_pretrained(
+                refinement_model, 
+                local_files_only=local_files_only,
+                cache_dir=cache_dir
+            )
+            refine_model = AutoModelForSeq2SeqLM.from_pretrained(
+                refinement_model, 
+                local_files_only=local_files_only,
+                cache_dir=cache_dir
+            ).to(device)
+        except Exception as e:
+            st.error(f"Failed to load refinement model: {str(e)}")
+            raise
 
         # Summarization pipeline without fixed max_length
         summarization_pipeline = lambda text, max_len: HuggingFacePipeline(
@@ -109,7 +139,6 @@ def initialize_pipelines(summarization_model="facebook/bart-large-cnn",
         ).invoke(text)
         
         # Question generation pipeline
-        from transformers import T5Tokenizer  # Add this import at the top of your file
         question_pipeline = HuggingFacePipeline(
             pipeline=pipeline(
                 "text2text-generation",
@@ -339,13 +368,22 @@ def main():
             help="Choose the model for refining the summary (only used with model-based refinement)"
         )
     
-    # Load models when app starts
-    with st.spinner("Loading models... This may take a minute on first run"):
-        pipelines = initialize_pipelines(
-            summarization_model=summarization_model,
-            question_model=question_model,
-            refinement_model=refinement_model
-        )
+    # Handle potential model loading errors
+    try:
+        # Load models when app starts
+        with st.spinner("Loading models... This may take a minute on first run"):
+            pipelines = initialize_pipelines(
+                summarization_model=summarization_model,
+                question_model=question_model,
+                refinement_model=refinement_model
+            )
+    except Exception as e:
+        st.error(f"Failed to initialize models: {str(e)}")
+        st.error("Please try again or select different models")
+        # Show a message about offline mode if that's the issue
+        if os.environ.get('TRANSFORMERS_OFFLINE', '0') == '1':
+            st.warning("Application is running in offline mode. Models must be downloaded before starting.")
+        return
     
     # Sample article options
     st.markdown('<p class="sub-header">Article Input</p>', unsafe_allow_html=True)
@@ -389,38 +427,42 @@ The economic transition needed is significant but also presents opportunities fo
             st.error("Please enter a longer article (at least 100 characters)")
         else:
             with st.spinner("Processing article..."):
-                result = process_article(
-                    article_text, 
-                    refinement_method, 
-                    num_questions,
-                    pipelines
-                )
-            
-            # Display results
-            st.markdown('<p class="sub-header">Generated Content</p>', unsafe_allow_html=True)
-            
-            # Summary section
-            with st.expander("Article Summary", expanded=True):
-                st.markdown(f"<div class='highlight'>{result['summary']}</div>", unsafe_allow_html=True)
-            
-            # Refined summary section
-            with st.expander("Refined Summary", expanded=True):
-                st.markdown(f"<p class='info-text'>Refinement method: <b>{result['refinement_method']}</b></p>", unsafe_allow_html=True)
-                st.markdown(f"<div class='highlight'>{result['refined_summary']}</div>", unsafe_allow_html=True)
-            
-            # Questions section
-            st.markdown("### Generated Questions")
-            for i, question in enumerate(result["questions"], 1):
-                st.markdown(f"<div class='question'><b>Q{i}:</b> {question}</div>", unsafe_allow_html=True)
-            
-            # Allow export of questions
-            questions_text = "\n".join([f"Q{i}: {q}" for i, q in enumerate(result["questions"], 1)])
-            st.download_button(
-                label="Download Questions",
-                data=questions_text,
-                file_name="generated_questions.txt",
-                mime="text/plain"
-            )
+                try:
+                    result = process_article(
+                        article_text, 
+                        refinement_method, 
+                        num_questions,
+                        pipelines
+                    )
+                
+                    # Display results
+                    st.markdown('<p class="sub-header">Generated Content</p>', unsafe_allow_html=True)
+                    
+                    # Summary section
+                    with st.expander("Article Summary", expanded=True):
+                        st.markdown(f"<div class='highlight'>{result['summary']}</div>", unsafe_allow_html=True)
+                    
+                    # Refined summary section
+                    with st.expander("Refined Summary", expanded=True):
+                        st.markdown(f"<p class='info-text'>Refinement method: <b>{result['refinement_method']}</b></p>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='highlight'>{result['refined_summary']}</div>", unsafe_allow_html=True)
+                    
+                    # Questions section
+                    st.markdown("### Generated Questions")
+                    for i, question in enumerate(result["questions"], 1):
+                        st.markdown(f"<div class='question'><b>Q{i}:</b> {question}</div>", unsafe_allow_html=True)
+                    
+                    # Allow export of questions
+                    questions_text = "\n".join([f"Q{i}: {q}" for i, q in enumerate(result["questions"], 1)])
+                    st.download_button(
+                        label="Download Questions",
+                        data=questions_text,
+                        file_name="generated_questions.txt",
+                        mime="text/plain"
+                    )
+                except Exception as e:
+                    st.error(f"Error processing article: {str(e)}")
+                    st.error("Please try again or use a different article")
     
     # Add information about the app
     with st.expander("About this App"):
